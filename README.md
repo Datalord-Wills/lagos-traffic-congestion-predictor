@@ -34,13 +34,17 @@ notebook.
 
 - **Algorithm**: Random Forest (`class_weight="balanced"`), tuned via
   `RandomizedSearchCV` (5-fold CV, `scoring="f1_macro"`)
+- **Encoding**: scikit-learn's `OneHotEncoder` inside a `ColumnTransformer`
+  (originally built with `category_encoders`, later switched for more
+  stable cross-environment pickle compatibility on Streamlit Cloud —
+  see "Deployment note" below)
 - **Best params**: `n_estimators=500, max_depth=None, min_samples_split=2, min_samples_leaf=2`
 - **Features**: Day of week, segment, road type, lanes, vehicle counts
   (Car/Keke-Okada/Bus/Truck), market day, school hours, rainfall
   intensity, fuel scarcity, day of month, month, weekend flag, minute,
   and cyclically-encoded hour (`hour_sin`/`hour_cos`)
 - **Target**: `Traffic_Situation`, ordinal 1=Low, 2=Normal, 3=High, 4=Heavy
-- **Performance**: CV F1-macro 0.948, Train F1-macro 0.996, Test F1-macro 0.947
+- **Performance**: CV F1-macro 0.949, Train F1-macro 0.996, Test F1-macro 0.947
 - **Evaluation metric rationale**: F1-macro was used instead of accuracy
   because the classes are imbalanced (~49% Low, 37% Normal, 10% High,
   4% Heavy); accuracy would let the model ignore the rare-but-critical
@@ -49,6 +53,21 @@ notebook.
 - **Confusion matrix finding**: the model never confuses the two
   extremes (Low↔Heavy) — all misclassifications occur between adjacent
   severity levels, which matters for real-world usability.
+
+## Deployment note: why sklearn's OneHotEncoder instead of category_encoders
+
+The model was originally built with `category_encoders.OneHotEncoder`
+(as in `Model.ipynb`). During deployment, this caused a
+`AttributeError: 'OrdinalEncoder' object has no attribute 'index_start'`
+on Streamlit Community Cloud — a cross-environment pickle compatibility
+issue where `category_encoders`'s internal object structure didn't
+unpickle reliably in a freshly-built cloud environment, even with an
+identical version pin. `reproduce_model.py` was updated to use
+scikit-learn's own `OneHotEncoder` via a `ColumnTransformer` instead —
+same features, same Random Forest hyperparameters, same target,
+functionally equivalent performance (Test F1-macro 0.947 vs. 0.947) —
+since sklearn's pickle portability across environments is far more
+dependable.
 
 ## Known limitation worth noting
 

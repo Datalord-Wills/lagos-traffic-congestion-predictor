@@ -1,11 +1,10 @@
 """
-Reproduces the exact model training pipeline from Model.ipynb so that
-model.pkl matches what was evaluated in the capstone notebook
-(Random Forest, F1-macro ~0.947 on the held-out test set).
-
-This is NOT a new/different model -- it's the same wrangle(), same
-train/test split, same RandomizedSearchCV grid and random_state, on the
-same dataset, producing the same trained pipeline.
+Same model as reproduce_model.py (identical wrangle(), features, target,
+Random Forest hyperparameter search) -- the ONLY change is swapping
+category_encoders.OneHotEncoder for sklearn's own OneHotEncoder inside a
+ColumnTransformer. This avoids cross-environment pickle compatibility
+issues that category_encoders can run into on platforms like Streamlit
+Community Cloud.
 """
 
 import joblib
@@ -15,7 +14,8 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, KFold, RandomizedSearchCV
 from sklearn.metrics import f1_score, classification_report
-from category_encoders import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import make_pipeline
 
 
@@ -24,7 +24,6 @@ from sklearn.pipeline import make_pipeline
 # ----------------------------------------------------------------------
 def wrangle(URL):
     df = pd.read_csv(URL)
-    # Data preprocessing
     df['Date'] = pd.to_datetime(df['Date'])
     df['Day_of_month'] = df['Date'].dt.day
     df['Month'] = df['Date'].dt.month
@@ -37,19 +36,15 @@ def wrangle(URL):
     df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
 
-    # Drop columns that are not needed
     df.drop(columns=['Time', 'hour', 'Date', 'State'], inplace=True)
 
-    # Change the order of the "target" to ensure an ordinal progression and split
     order = {'Heavy': 4, 'High': 3, 'Normal': 2, 'Low': 1}
     df['Traffic_Situation'] = df['Traffic_Situation'].str.split("-").str[-1]
     df['Traffic_Situation'] = df['Traffic_Situation'].map(order)
 
-    # Convert "bool" columns to integer
     bool_cols = df.select_dtypes(include='bool').columns
     df[bool_cols] = df[bool_cols].astype(int)
 
-    # Drop leakages
     df.drop(columns=["Total", "Is_Raining"], inplace=True)
 
     return df
@@ -60,23 +55,30 @@ def wrangle(URL):
 # ----------------------------------------------------------------------
 traffic_data = wrangle("lagos_synthetic_traffic_dataset.csv")
 print("Wrangled shape:", traffic_data.shape)
-print("Feature columns:", [c for c in traffic_data.columns if c != 'Traffic_Situation'])
 
 X = traffic_data.drop(columns=['Traffic_Situation'])
 y = traffic_data['Traffic_Situation']
 
+CATEGORICAL_COLS = ['Day_of_week', 'Segment', 'Road_Type']
+
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=0.20,
-    random_state=42,
-    stratify=y
+    X, y, test_size=0.20, random_state=42, stratify=y
 )
 
 # ----------------------------------------------------------------------
-# Random Forest + RandomizedSearchCV (identical grid/params to Model.ipynb)
+# Random Forest + sklearn OneHotEncoder (via ColumnTransformer)
 # ----------------------------------------------------------------------
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False), CATEGORICAL_COLS)
+    ],
+    remainder='passthrough',
+    verbose_feature_names_out=False,
+)
+preprocessor.set_output(transform="pandas")
+
 clf_rf = make_pipeline(
-    OneHotEncoder(use_cat_names=True),
+    preprocessor,
     RandomForestClassifier(random_state=42, class_weight="balanced")
 )
 
@@ -108,7 +110,7 @@ print("Best parameters:", random_result_rf.best_params_)
 model = random_result_rf.best_estimator_
 
 # ----------------------------------------------------------------------
-# Evaluation (matches Model.ipynb reporting)
+# Evaluation
 # ----------------------------------------------------------------------
 y_pred = model.predict(X_test)
 test_f1_macro = f1_score(y_test, y_pred, average='macro')
@@ -120,25 +122,15 @@ print("\nClassification report (test):")
 print(classification_report(y_test, y_pred, target_names=['Low', 'Normal', 'High', 'Heavy']))
 
 # ----------------------------------------------------------------------
-# Save segment metadata lookup (used by the Streamlit app to auto-fill
-# Road_Type / Lanes once a user picks a Segment)
+# Segment metadata + model save
 # ----------------------------------------------------------------------
-segment_meta = (
-    traffic_data.merge(
-        pd.read_csv("lagos_synthetic_traffic_dataset.csv")[['Segment', 'Road_Type', 'Lanes']].drop_duplicates(),
-        left_index=False, right_index=False, how="cross"
-    ) if False else None
-)
-# Simpler: pull directly from the raw CSV (Segment/Road_Type/Lanes are static per segment)
 raw = pd.read_csv("lagos_synthetic_traffic_dataset.csv")
 segment_meta = raw[['Segment', 'Road_Type', 'Lanes']].drop_duplicates().sort_values('Segment').reset_index(drop=True)
 segment_meta.to_csv("segment_metadata.csv", index=False)
-print("\nSegment metadata:")
-print(segment_meta)
 
-# ----------------------------------------------------------------------
-# Save model (matches Model.ipynb's joblib.dump(model, "model.pkl"))
-# ----------------------------------------------------------------------
-joblib.dump(model, "model.pkl")
-print("\nSaved model.pkl")
-print("Model expects columns (in order):", list(model.named_steps["onehotencoder"].feature_names_in_))
+joblib.dump(model, "model.pkl", compress=3)
+print("\nSaved model.pkl (sklearn OneHotEncoder version)")
+
+encoded_features = model.named_steps["columntransformer"].get_feature_names_out()
+print("Model expects columns (post-encoding):", list(encoded_features))
+print("Model expects raw input columns (in order):", list(X.columns))
